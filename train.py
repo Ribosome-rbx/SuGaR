@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         'Computing a traditional colored UV texture should take less than 10 minutes.')
     parser.add_argument('--square_size',
                         default=10, type=int, help='Size of the square to use for the UV texture.')
-    parser.add_argument('--postprocess_mesh', type=str2bool, default=False, 
+    parser.add_argument('--postprocess_mesh', type=str2bool, default=True, 
                         help='If True, postprocess the mesh by removing border triangles with low-density. '
                         'This step takes a few minutes and is not needed in general, as it can also be risky. '
                         'However, it increases the quality of the mesh in some cases, especially when an object is visible only from one side.')
@@ -73,11 +73,11 @@ if __name__ == "__main__":
                         'This file can be large (+/- 500MB), but is needed for using the dedicated viewer. Default is True.')
     
     # (Optional) Default configurations
-    parser.add_argument('--low_poly', type=str2bool, default=False, 
+    parser.add_argument('--low_poly', type=str2bool, default=True, 
                         help='Use standard config for a low poly mesh, with 200k vertices and 6 Gaussians per triangle.')
     parser.add_argument('--high_poly', type=str2bool, default=False,
                         help='Use standard config for a high poly mesh, with 1M vertices and 1 Gaussians per triangle.')
-    parser.add_argument('--refinement_time', type=str, default=None, 
+    parser.add_argument('--refinement_time', type=str, default='short', 
                         help="Default configs for time to spend on refinement. Can be 'short', 'medium' or 'long'.")
       
     # Evaluation split
@@ -87,6 +87,10 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int, default=0, help='Index of GPU device to use.')
 
     # Parse arguments
+    # modified config: 
+    # postprocess_mesh -> True
+    # low_poly -> True
+    # refinement_time -> short
     args = parser.parse_args()
     if args.low_poly:
         args.n_vertices_in_mesh = 200_000
@@ -111,6 +115,7 @@ if __name__ == "__main__":
         print('Will export a ply file with the refined 3D Gaussians at the end of the training.')
     
     # ----- Optimize coarse SuGaR -----
+    args.scene_path = f"/run/user/1000/gvfs/smb-share:server=mocap-stor-02.inf.ethz.ch,share=ssd/data1/HOODs/Datasets/{args.scene_path}"
     coarse_args = AttrDict({
         'checkpoint_path': args.checkpoint_path,
         'scene_path': args.scene_path,

@@ -11,29 +11,42 @@
 
 import os
 import sys
-from PIL import Image
+import glob
+from PIL import Image, ImageFilter
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
 import json
+import pickle
+import trimesh
+from sklearn import neighbors
 from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+from utils.io_utils import read_obj
 
-class CameraInfo(NamedTuple):
-    uid: int
-    R: np.array
-    T: np.array
-    FovY: np.array
-    FovX: np.array
-    image: np.array
-    image_path: str
-    image_name: str
-    width: int
-    height: int
+class CameraInfo():
+    def __init__(self, uid, R, T, FovY, FovX, fx, fy, cx, cy,
+                 image=None, image_path=None, image_name=None,
+                 width=None, height=None, mask=None):
+        self.uid = uid
+        self.R = R
+        self.T = T
+        self.FovY = FovY
+        self.FovX = FovX
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.image = image
+        self.image_path = image_path
+        self.image_name = image_name
+        self.width = width
+        self.height = height
+        self.mask = mask
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -64,6 +77,142 @@ def getNerfppNorm(cam_info):
     translate = -center
 
     return {"translate": translate, "radius": radius}
+
+def load4DDress(_name, white_background=False, llffhold=8):
+    _name = _name.split('/')[-1]
+    # locate sequence
+    fg_label = "upper"
+    panelize_labels = [fg_label, "background"]
+    seq_path = os.path.join(f'/run/user/1000/gvfs/smb-share:server=mocap-stor-02.inf.ethz.ch,share=ssd/data1/HOODs/Datasets/{_name}')
+
+    # locate camera
+    cam_paths = sorted([os.path.join(seq_path, fn) for fn in os.listdir(seq_path) if '00' in fn])
+    camera_params = json.load(open(os.path.join(seq_path, 'cameras.json'), 'r'))
+    cam_num = len(cam_paths)
+    # frame info
+    _imgs = sorted(glob.glob(os.path.join(cam_paths[0], "capture_images/*.png")))
+    start_frame = int(_imgs[0].split('/')[-1].split(".png")[0])
+    frame_num = len(_imgs)
+
+    # 4DDress dataset pre-defined labels
+    SURFACE_LABEL = ['full_body', 'skin', 'upper', 'lower', 'hair', 'glove', 'shoe', 'outer', 'background']
+    GRAY_VALUE = np.array([255, 128, 98, 158, 188, 218, 38, 68, 255])
+    MaskLabel = dict(zip(SURFACE_LABEL, GRAY_VALUE))
+
+
+    ############## Loading frame ##############
+    frame_idx = start_frame
+    camera_infos = []
+
+    # process all cameras
+    for idx, _cam in enumerate(cam_paths):
+        print(f"[4DDress] Reading frame {frame_idx} camera {idx+1}/{cam_num} ")
+
+        _img = os.path.join(_cam,"capture_images",f"{frame_idx:05d}.png")
+        _lab = os.path.join(_cam,"capture_labels",f"{frame_idx:05d}.png")
+        cam_name = _cam.split('/')[-1]
+
+        image = Image.open(_img)
+        width, height = image.size
+
+        # get camera intrinsic and extrinsic matrices
+        intrinsic = np.asarray(camera_params[cam_name]["intrinsics"])
+        extrinsic = np.asarray(camera_params[cam_name]["extrinsics"])
+
+        R, T = np.transpose(extrinsic[:, :3]), extrinsic[:, 3]
+        fx, fy = intrinsic[0, 0], intrinsic[1, 1]
+        cx, cy = intrinsic[:2, 2]
+        FovY, FovX = focal2fov(fy, height), focal2fov(fx, width)
+
+        label = np.array(Image.open(_lab))[...,None]
+        mask = label == MaskLabel[fg_label]
+        if fg_label == 'full_body': mask = ~mask
+
+        bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+        masked_img =  np.array(image) * mask + 255 * bg * ~mask
+        image = Image.fromarray(np.array(masked_img, dtype=np.byte), "RGB")
+
+        # get panelize mask
+        if len(panelize_labels) > 1: 
+            panelize = np.zeros_like(mask)
+            for key in panelize_labels:
+                mask = label == MaskLabel[key]
+                if key == 'full_body': mask = ~mask
+                panelize += mask
+
+            # # gaussian blur panelization mask
+            # _img = panelize * 255
+            # _img = Image.fromarray(np.concatenate([_img,_img,_img], axis=-1, dtype=np.byte), "RGB")
+            # _img = np.array(_img.filter(ImageFilter.GaussianBlur(radius=10)))[...,:1] / 255
+            # panelize = panelize + _img * ~panelize
+        else:
+            panelize = mask
+            
+
+        # append camera_info        
+        camera_info = CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,  fx=fx, fy=fy, cx=cx, cy=cy, image=image, mask=panelize,
+                                image_path=_img, image_name=cam_name, width=width, height=height)
+        camera_infos.append(camera_info)
+    cam_infos = sorted(camera_infos.copy(), key = lambda x : x.image_name)
+
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    # init pcd
+    _template = f"/home/borong/Desktop/thesis/datas/template/{fg_label}/{fg_label}_remesh.obj"
+    tem_dict = read_obj(_template)
+
+    _scan = os.path.join(os.path.dirname(_template), 'cloth.pkl')
+    scan_dict = pickle.load(open(_scan, "rb"))[fg_label]
+
+    # Convert mesh to point cloud
+    xyz = tem_dict['vertices'][tem_dict['faces']].mean(1)
+    scan_xyz = scan_dict['vertices'][scan_dict['faces']].mean(1)
+    scan_rgb = scan_dict['colors'][scan_dict['faces'], :3].mean(1)
+
+    _, face_ind = neighbors.KDTree(scan_xyz).query(xyz)
+    rgb = scan_rgb[face_ind.reshape(-1)]
+
+    # store PC as mesh.ply
+    ply_path = os.path.join(os.path.dirname(_template), "input.ply")
+    storePly(ply_path, xyz, rgb)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##################### Original 3d GS #####################
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
@@ -221,12 +370,13 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
-    print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+    # print("Reading Test Transforms")
+    # test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
     
-    if not eval:
-        train_cam_infos.extend(test_cam_infos)
-        test_cam_infos = []
+    # if not eval:
+    #     train_cam_infos.extend(test_cam_infos)
+    #     test_cam_infos = []
+    test_cam_infos = []
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 

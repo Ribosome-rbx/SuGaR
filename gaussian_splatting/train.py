@@ -11,6 +11,7 @@
 
 import os
 import torch
+import torch.nn.functional as F
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -88,9 +89,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        mask = viewpoint_cam.gt_alpha_mask.cuda()
+
+        loss_dict = {}
+        loss_dict['img'] = l1_loss(image, gt_image, mask) * (1.0 - opt.lambda_dssim)
+        loss_dict['ssim'] = 1.0 - ssim(image, gt_image, mask) * opt.lambda_dssim   
+        scale = gaussians.get_scaling[visibility_filter] 
+        loss_dict['scale']  = F.relu(scale - opt.threshold_scale).norm(dim=1).mean() * opt.lambda_scale
+
+        loss = 0
+        for k, v in loss_dict.items():
+            loss = loss + v
         loss.backward()
+        # wandb.log({
+        #     "scale_min": scale.min(),
+        #     "scale_max": scale.max(),
+        #     "scale_mean": scale.mean(),
+        # })
 
         iter_end.record()
 
@@ -104,7 +119,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -191,6 +206,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
+    # import wandb
+    # wandb.init(project="GaussianCloth")
+
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)

@@ -7,7 +7,7 @@ from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.gaussian_renderer import render as gs_render
 from gaussian_splatting.scene.dataset_readers import fetchPly
 from sugar_utils.spherical_harmonics import SH2RGB
-from .cameras import CamerasWrapper, load_gs_cameras
+from .cameras import CamerasWrapper, load_4DDress_cameras
 
 
 class ModelParams(): 
@@ -108,11 +108,7 @@ class GaussianSplattingWrapper:
         
         self._C0 = 0.28209479177387814
         
-        cam_list = load_gs_cameras(
-            source_path=source_path,
-            gs_output_path=output_path,
-            load_gt_images=load_gt_images,
-            )
+        cam_list = load_4DDress_cameras(source_path)
         
         if eval_split:
             self.cam_list = []

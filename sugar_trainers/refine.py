@@ -344,7 +344,7 @@ def refined_training(args):
           )
 
     # Point cloud
-    if initialize_from_trained_3dgs:
+    if initialize_from_trained_3dgs: # False
         with torch.no_grad():    
             print("Initializing model from trained 3DGS...")
             with torch.no_grad():
@@ -361,7 +361,7 @@ def refined_training(args):
             n_points = len(points)
     else:
         CONSOLE.print("\nLoading SfM point cloud...")
-        pcd = fetchPly(ply_path)
+        pcd = fetchPly('../datas/syntheticNerf/lego/points3d.ply') # ply_path
         points = torch.tensor(pcd.points, device=nerfmodel.device).float().cuda()
         colors = torch.tensor(pcd.colors, device=nerfmodel.device).float().cuda()
     

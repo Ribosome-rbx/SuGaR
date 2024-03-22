@@ -1,6 +1,6 @@
 import os
 import json
-
+import glob
 import numpy as np
 import torch
 from PIL import Image
@@ -9,11 +9,10 @@ from pytorch3d.renderer import FoVPerspectiveCameras as P3DCameras
 from pytorch3d.renderer.cameras import _get_sfm_calibration_matrix
 
 from sugar_utils.graphics_utils import focal2fov, fov2focal, getWorld2View2, getProjectionMatrix
-from sugar_utils.general_utils import PILtoTorch
+from sugar_utils.general_utils import PILtoTorch, MasktoTorch
 
 
-def load_gs_cameras(source_path, gs_output_path, image_resolution=1, 
-                    load_gt_images=True, max_img_size=1920):
+def load_4DDress_cameras(seq_path, white_background=False):
     """Loads Gaussian Splatting camera parameters from a COLMAP reconstruction.
 
     Args:
@@ -26,89 +25,181 @@ def load_gs_cameras(source_path, gs_output_path, image_resolution=1,
     Returns:
         List of GSCameras: List of Gaussian Splatting cameras.
     """
-    image_dir = os.path.join(source_path, 'images')
-    
-    with open(gs_output_path + 'cameras.json') as f:
-        unsorted_camera_transforms = json.load(f)
-    camera_transforms = sorted(unsorted_camera_transforms.copy(), key = lambda x : x['img_name'])
+    # TODO config 
+    fg_label = "upper"
+    panelize_labels = [fg_label, "background"]
 
-    cam_list = []
-    extension = '.' + os.listdir(image_dir)[0].split('.')[-1]
-    if extension not in ['.jpg', '.png', '.JPG', '.PNG']:
-        print(f"Warning: image extension {extension} not supported.")
-    else:
-        print(f"Found image extension {extension}")
+    # locate camera
+    cam_paths = sorted([os.path.join(seq_path, fn) for fn in os.listdir(seq_path) if '00' in fn])
+    camera_params = json.load(open(os.path.join(seq_path, 'cameras.json'), 'r'))
+    cam_num = len(cam_paths)
+    # frame info
+    _imgs = sorted(glob.glob(os.path.join(cam_paths[0], "capture_images/*.png")))
+    start_frame = int(_imgs[0].split('/')[-1].split(".png")[0])
+    frame_num = len(_imgs)
+
+    # 4DDress dataset pre-defined labels
+    SURFACE_LABEL = ['full_body', 'skin', 'upper', 'lower', 'hair', 'glove', 'shoe', 'outer', 'background']
+    GRAY_VALUE = np.array([255, 128, 98, 158, 188, 218, 38, 68, 255])
+    MaskLabel = dict(zip(SURFACE_LABEL, GRAY_VALUE))
     
-    for cam_idx in range(len(camera_transforms)):
-        camera_transform = camera_transforms[cam_idx]
+    ############## Loading frame ##############
+    frame_idx = start_frame
+    camera_infos = []
+
+    # process all cameras
+    for idx, _cam in enumerate(cam_paths):
+        print(f"[4DDress] Reading frame {frame_idx} camera {idx+1}/{cam_num} ")
+
+        _img = os.path.join(_cam,"capture_images",f"{frame_idx:05d}.png")
+        _lab = os.path.join(_cam,"capture_labels",f"{frame_idx:05d}.png")
+        cam_name = _cam.split('/')[-1]
+
+        image = Image.open(_img)
+        width, height = image.size
+
+        # get camera intrinsic and extrinsic matrices
+        intrinsic = np.asarray(camera_params[cam_name]["intrinsics"])
+        extrinsic = np.asarray(camera_params[cam_name]["extrinsics"])
+
+        R, T = np.transpose(extrinsic[:, :3]), extrinsic[:, 3]
+        fx, fy = intrinsic[0, 0], intrinsic[1, 1]
+        cx, cy = intrinsic[:2, 2]
+        FovY, FovX = focal2fov(fy, height), focal2fov(fx, width)
+
+        label = np.array(Image.open(_lab))[...,None]
+        mask = label == MaskLabel[fg_label]
+        if fg_label == 'full_body': mask = ~mask
+
+        bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+        masked_img =  np.array(image) * mask + 255 * bg * ~mask
+        image = Image.fromarray(np.array(masked_img, dtype=np.byte), "RGB")
+
+        # get panelize mask
+        panelize = np.zeros_like(mask)
+        for key in panelize_labels:
+            mask = label == MaskLabel[key]
+            if key == 'full_body': mask = ~mask
+            panelize += mask
+
+
+        resized_image_rgb = PILtoTorch(image, image.size)
+        gt_image = resized_image_rgb[:3, ...]
+        loaded_mask = MasktoTorch(panelize)
+
+        if resized_image_rgb.shape[1] == 4:
+            loaded_mask = resized_image_rgb[3:4, ...]
+
+
+        # append camera_info        
+        camera_info = GSCamera(uid=idx, colmap_id=idx, image=gt_image, gt_alpha_mask=loaded_mask, 
+                                 R=R, T=T, FoVy=FovY, FoVx=FovX, fx=fx, fy=fy, cx=cx, cy=cy,
+                                 image_name=cam_name, image_width=width, image_height=height)
+
+        camera_infos.append(camera_info)
+    cam_infos = sorted(camera_infos.copy(), key = lambda x : x.image_name)
+
+    return cam_infos
+
+# def load_gs_cameras(source_path, gs_output_path, image_resolution=1, 
+#                     load_gt_images=True, max_img_size=1920):
+#     """Loads Gaussian Splatting camera parameters from a COLMAP reconstruction.
+
+#     Args:
+#         source_path (str): Path to the source data.
+#         gs_output_path (str): Path to the Gaussian Splatting output.
+#         image_resolution (int, optional): Factor by which to downscale the images. Defaults to 1.
+#         load_gt_images (bool, optional): If True, loads the ground truth images. Defaults to True.
+#         max_img_size (int, optional): Maximum size of the images. Defaults to 1920.
+
+#     Returns:
+#         List of GSCameras: List of Gaussian Splatting cameras.
+#     """
+#     image_dir = os.path.join(source_path, 'images')
+    
+#     with open(os.path.join(gs_output_path, 'cameras.json')) as f:
+#         unsorted_camera_transforms = json.load(f)
+#     camera_transforms = sorted(unsorted_camera_transforms.copy(), key = lambda x : x['img_name'])
+
+#     cam_list = []
+#     extension = '.' + os.listdir(image_dir)[0].split('.')[-1]
+#     if extension not in ['.jpg', '.png', '.JPG', '.PNG']:
+#         print(f"Warning: image extension {extension} not supported.")
+#     else:
+#         print(f"Found image extension {extension}")
+    
+#     for cam_idx in range(len(camera_transforms)):
+#         camera_transform = camera_transforms[cam_idx]
         
-        # Extrinsics
-        rot = np.array(camera_transform['rotation'])
-        pos = np.array(camera_transform['position'])
+#         # Extrinsics
+#         rot = np.array(camera_transform['rotation'])
+#         pos = np.array(camera_transform['position'])
         
-        W2C = np.zeros((4,4))
-        W2C[:3, :3] = rot
-        W2C[:3, 3] = pos
-        W2C[3,3] = 1
+#         W2C = np.zeros((4,4))
+#         W2C[:3, :3] = rot
+#         W2C[:3, 3] = pos
+#         W2C[3,3] = 1
         
-        Rt = np.linalg.inv(W2C)
-        T = Rt[:3, 3]
-        R = Rt[:3, :3].transpose()
+#         Rt = np.linalg.inv(W2C)
+#         T = Rt[:3, 3]
+#         R = Rt[:3, :3].transpose()
         
-        # Intrinsics
-        width = camera_transform['width']
-        height = camera_transform['height']
-        fy = camera_transform['fy']
-        fx = camera_transform['fx']
-        fov_y = focal2fov(fy, height)
-        fov_x = focal2fov(fx, width)
+#         # Intrinsics
+#         width = camera_transform['width']
+#         height = camera_transform['height']
+#         fy = camera_transform['fy']
+#         fx = camera_transform['fx']
+#         fov_y = focal2fov(fy, height)
+#         fov_x = focal2fov(fx, width)
         
-        # GT data
-        id = camera_transform['id']
-        name = camera_transform['img_name']
-        image_path = os.path.join(image_dir,  name + extension)
+#         # GT data
+#         id = camera_transform['id']
+#         name = camera_transform['img_name']
+#         image_path = os.path.join(image_dir,  name + extension)
         
-        if load_gt_images:
-            image = Image.open(image_path)
-            orig_w, orig_h = image.size
-            downscale_factor = 1
-            if image_resolution in [1, 2, 4, 8]:
-                downscale_factor = image_resolution
-                # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
-            if max(orig_h, orig_w) > max_img_size:
-                additional_downscale_factor = max(orig_h, orig_w) / max_img_size
-                downscale_factor = additional_downscale_factor * downscale_factor
-            resolution = round(orig_w/(downscale_factor)), round(orig_h/(downscale_factor))
-            resized_image_rgb = PILtoTorch(image, resolution)
-            gt_image = resized_image_rgb[:3, ...]
+#         if load_gt_images:
+#             image = Image.open(image_path)
+#             orig_w, orig_h = image.size
+#             downscale_factor = 1
+#             if image_resolution in [1, 2, 4, 8]:
+#                 downscale_factor = image_resolution
+#                 # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
+#             if max(orig_h, orig_w) > max_img_size:
+#                 additional_downscale_factor = max(orig_h, orig_w) / max_img_size
+#                 downscale_factor = additional_downscale_factor * downscale_factor
+#             resolution = round(orig_w/(downscale_factor)), round(orig_h/(downscale_factor))
+#             resized_image_rgb = PILtoTorch(image, resolution)
+#             gt_image = resized_image_rgb[:3, ...]
             
-            image_height, image_width = None, None
-        else:
-            gt_image = None
-            if image_resolution in [1, 2, 4, 8]:
-                downscale_factor = image_resolution
-                # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
-            if max(height, width) > max_img_size:
-                additional_downscale_factor = max(height, width) / max_img_size
-                downscale_factor = additional_downscale_factor * downscale_factor
-            image_height, image_width = round(height/downscale_factor), round(width/downscale_factor)
+#             image_height, image_width = None, None
+#         else:
+#             gt_image = None
+#             if image_resolution in [1, 2, 4, 8]:
+#                 downscale_factor = image_resolution
+#                 # resolution = round(orig_w/(image_resolution)), round(orig_h/(image_resolution))
+#             if max(height, width) > max_img_size:
+#                 additional_downscale_factor = max(height, width) / max_img_size
+#                 downscale_factor = additional_downscale_factor * downscale_factor
+#             image_height, image_width = round(height/downscale_factor), round(width/downscale_factor)
         
-        gs_camera = GSCamera(
-            colmap_id=id, image=gt_image, gt_alpha_mask=None,
-            R=R, T=T, FoVx=fov_x, FoVy=fov_y,
-            image_name=name, uid=id,
-            image_height=image_height, image_width=image_width,)
+#         gs_camera = GSCamera(
+#             colmap_id=id, image=gt_image, gt_alpha_mask=None,
+#             R=R, T=T, FoVx=fov_x, FoVy=fov_y,
+#             image_name=name, uid=id,
+#             image_height=image_height, image_width=image_width,)
         
-        cam_list.append(gs_camera)
+#         cam_list.append(gs_camera)
+#     breakpoint()
 
-    return cam_list
+#     return cam_list
 
 
 class GSCamera(torch.nn.Module):
     """Class to store Gaussian Splatting camera parameters.
     """
-    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
-                 image_name, uid,
+    def __init__(self, uid, colmap_id, R, T, FoVx, FoVy, fx, fy, cx, cy,
+                 image, gt_alpha_mask, image_name,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  image_height=None, image_width=None,
                  ):
@@ -140,7 +231,12 @@ class GSCamera(torch.nn.Module):
         self.T = T
         self.FoVx = FoVx
         self.FoVy = FoVy
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
         self.image_name = image_name
+        self.gt_alpha_mask = gt_alpha_mask
 
         try:
             self.data_device = torch.device(data_device)
@@ -172,7 +268,7 @@ class GSCamera(torch.nn.Module):
         self.scale = scale
 
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
+        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy, fx=self.fx, fy=self.fy, cx=self.cx, cy=self.cy, w=self.image_width, h=self.image_height).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         

@@ -227,7 +227,7 @@ def coarse_training_with_density_regularization(args):
     save_milestones = [9000, 12_000, 15_000]
 
     # ====================End of parameters====================
-
+    
     if args.output_dir is None:
         if len(args.scene_path.split("/")[-1]) > 0:
             args.output_dir = os.path.join("./output/coarse", args.scene_path.split("/")[-1])
@@ -250,6 +250,7 @@ def coarse_training_with_density_regularization(args):
             )
     
     use_eval_split = args.eval
+    #  {'checkpoint_path': 'output/debug', 'scene_path': '00190_Inner_Take2_New', 'iteration_to_load': 7000, 'output_dir': './output/coarse/00190_Inner_Take2_New', 'eval': True, 'estimation_factor': 0.2, 'normal_factor': 0.2, 'gpu': 0}
     
     ply_path = os.path.join(source_path, "sparse/0/points3D.ply")
     
@@ -295,7 +296,7 @@ def coarse_training_with_density_regularization(args):
     CONSOLE.print(f'{len(nerfmodel.training_cameras)} training images detected.')
     CONSOLE.print(f'The model has been trained for {iteration_to_load} steps.')
 
-    if downscale_resolution_factor != 1:
+    if downscale_resolution_factor != 1: # False
        nerfmodel.downscale_output_resolution(downscale_resolution_factor)
     CONSOLE.print(f'\nCamera resolution scaled to '
           f'{nerfmodel.training_cameras.gs_cameras[0].image_height} x '
@@ -303,7 +304,7 @@ def coarse_training_with_density_regularization(args):
           )
 
     # Point cloud
-    if initialize_from_trained_3dgs:
+    if initialize_from_trained_3dgs: # True
         with torch.no_grad():    
             print("Initializing model from trained 3DGS...")
             with torch.no_grad():
@@ -333,21 +334,21 @@ def coarse_training_with_density_regularization(args):
             
     CONSOLE.print(f"Point cloud generated. Number of points: {len(points)}")
     
-    # Mesh to bind to if needed  TODO
-    if bind_to_surface_mesh:
-        surface_mesh_to_bind_full_path = os.path.join('./results/meshes/', surface_mesh_to_bind_path)
-        CONSOLE.print(f'\nLoading mesh to bind to: {surface_mesh_to_bind_full_path}...')
-        o3d_mesh = o3d.io.read_triangle_mesh(surface_mesh_to_bind_full_path)
-        CONSOLE.print("Mesh to bind to loaded.")
-    else:
-        o3d_mesh = None
-        learn_surface_mesh_positions = False
-        learn_surface_mesh_opacity = False
-        learn_surface_mesh_scales = False
-        n_gaussians_per_surface_triangle=1
+    # # Mesh to bind to if needed  TODO
+    # if bind_to_surface_mesh:  # False
+    #     surface_mesh_to_bind_full_path = os.path.join('./results/meshes/', surface_mesh_to_bind_path)
+    #     CONSOLE.print(f'\nLoading mesh to bind to: {surface_mesh_to_bind_full_path}...')
+    #     o3d_mesh = o3d.io.read_triangle_mesh(surface_mesh_to_bind_full_path)
+    #     CONSOLE.print("Mesh to bind to loaded.")
+    # else:
+    o3d_mesh = None
+    learn_surface_mesh_positions = False
+    learn_surface_mesh_opacity = False
+    learn_surface_mesh_scales = False
+    n_gaussians_per_surface_triangle=1
     
-    if not regularize_sdf:
-        beta_mode = None
+    # if not regularize_sdf: # not True
+    beta_mode = None
     
     # ====================Initialize SuGaR model====================
     # Construct SuGaR model
@@ -371,10 +372,10 @@ def coarse_training_with_density_regularization(args):
         n_gaussians_per_surface_triangle=n_gaussians_per_surface_triangle,
         )
     
-    if initialize_from_trained_3dgs:
+    if initialize_from_trained_3dgs: # True
         with torch.no_grad():            
             CONSOLE.print("Initializing 3D gaussians from 3D gaussians...")
-            if prune_at_start:
+            if prune_at_start: # False
                 sugar._scales[...] = nerfmodel.gaussians._scaling.detach()[start_prune_mask]
                 sugar._quaternions[...] = nerfmodel.gaussians._rotation.detach()[start_prune_mask]
                 sugar.all_densities[...] = nerfmodel.gaussians._opacity.detach()[start_prune_mask]
@@ -459,7 +460,7 @@ def coarse_training_with_density_regularization(args):
     train_losses = []
     t0 = time.time()
     
-    if initialize_from_trained_3dgs:
+    if initialize_from_trained_3dgs:  # True
         iteration = 7000 - 1
     
     for batch in range(9_999_999):
@@ -725,7 +726,7 @@ def coarse_training_with_density_regularization(args):
                 loss = 0.
                 
             # Surface mesh optimization
-            if bind_to_surface_mesh:
+            if bind_to_surface_mesh: # False
                 surface_mesh = sugar.surface_mesh
                 
                 if use_surface_mesh_laplacian_smoothing_loss:
